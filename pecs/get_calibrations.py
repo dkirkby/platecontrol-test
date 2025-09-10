@@ -12,6 +12,7 @@ parser.add_argument('-m', '--comment', type=str, default='', help='Comment strin
 parser.add_argument('-dl', '--disable_logger', action='store_true', help='Disable logging to disk.')
 parser.add_argument('-az', '--add_zeno', action='store_true', help='Add Zeno parameters')
 parser.add_argument('-zo', '--zeno_only', action='store_true', help='Retrieve Zeno parameters only')
+parser.add_argument('-nn', '--no_neighbors', action='store_true', help='Do not record POS_NEIGHBORS or FIXED_NEIGHBROS if using a newer version of astropy (>=5.0.0)')
 uargs = parser.parse_args()
 
 # general imports
@@ -87,10 +88,10 @@ query_keys = {'POS_ID': 'unique serial id number of fiber positioner',
               'OBS_Y': 'current y position in global coordinates (a.k.a. "CS5" or "y_fp") as transformed from (POS_T, POS_P)',
               }
 zeno_query_keys = {'ZENO_MOTOR_P': 'boolean of whether phi motor is ZENO',
-                   'SZ_CW_P': 'scale factor for zeno phi axis in clockwise direction', 
-                   'SZ_CCW_P': 'scale factor for zeno phi axis in counter-clockwise direction',  
+                   'SZ_CW_P': 'scale factor for zeno phi axis in clockwise direction',
+                   'SZ_CCW_P': 'scale factor for zeno phi axis in counter-clockwise direction',
                    'ZENO_MOTOR_T': 'boolean of whether theta motor is ZENO',
-                   'SZ_CW_T': 'scale factor for zeno theta axis in clockwise direction', 
+                   'SZ_CW_T': 'scale factor for zeno theta axis in clockwise direction',
                    'SZ_CCW_T': 'scale factor for zeno theta axis in counter-clockwise direction'}
 query_keys_map = {'PTL_X': 'ptlX',
                   'PTL_Y': 'ptlY',
@@ -122,24 +123,29 @@ keepout_T_note = f'central body (theta) polygon {flat_note}'
 keepout_P_note = f'eccentric body (phi) keepout polygon {flat_note}'
 general_collider_keys = {'timestep': '[sec] quantization when sweeping polygons through rotation schedules, to check for collisions',
                          'Eo_phi': '[deg] poslocP angle (poslocP = POS_P + OFFSET_P) above which phi is defined to be within envelope "Eo" (i.e. retracted)',
-                         'Eo_radius_with_margin': '[mm] when a positioner is CLASSIFED_AS_RETRACTED, neighbor polygons not allowed to enter this circle', 
+                         'Eo_radius_with_margin': '[mm] when a positioner is CLASSIFED_AS_RETRACTED, neighbor polygons not allowed to enter this circle',
                          }
 collider_general_poly_keys = {'general_keepout_T': f'basic {keepout_T_note}',
                               'general_keepout_P': f'basic {keepout_P_note}',
                               'keepout_PTL': f'petal boundary keepout polygon {flat_note}',
                               'keepout_GFA': f'GFA boundary keepout polygon {flat_note}',
                               }
-collider_query_keys = {'POS_NEIGHBORS': 'neighboring positioners',
-                       'FIXED_NEIGHBORS': 'neighboring fixed boundaries',
-                       }
+collider_query_keys = {}
 collider_pos_poly_keys = {'KEEPOUT_T': keepout_T_note,
                          'KEEPOUT_P': keepout_P_note,
                          }
 collider_pos_attr_map = {'KEEPOUT_T': 'keepouts_T',
                          'KEEPOUT_P': 'keepouts_P',
-                         'POS_NEIGHBORS': 'pos_neighbors',
-                         'FIXED_NEIGHBORS': 'fixed_neighbor_cases',
                          }
+if not uargs.no_neighbors:
+    neighbors2 = {'POS_NEIGHBORS': 'neighboring positioners',
+                  'FIXED_NEIGHBORS': 'neighboring fixed boundaries',
+                  }
+    neighbors1 = {'POS_NEIGHBORS': 'pos_neighbors',
+                 'FIXED_NEIGHBORS': 'fixed_neighbor_cases',
+                }
+    collider_query_keys.update(neighbors2)
+    collider_pos_attr_map.update(neighbors1)
 
 # dependently-calculated fields
 offset_variants = {'PTL': 'ptlXY', 'CS5': 'obsXY'}
@@ -246,7 +252,7 @@ else:
                           printfunc=logger.info,
                           )
         ptls[petal_id] = ptl
-        
+
 def getattr2(ptl, module_name, attr):
     '''Wrapper around getattr. Specifically for getting a property from submodules
     petal. Because when online this is behind the DOS proxy wall and so requires
@@ -257,7 +263,7 @@ def getattr2(ptl, module_name, attr):
         return ptl.app_get(s)
     module = getattr(ptl, module_name) if module_name else ptl
     return getattr(module, attr)
-    
+
 
 # Most of the remainder is enclosed in a try so that we can shut down PetalApps
 # at the end, even if a crash occurs before that.
@@ -285,7 +291,7 @@ try:
     meta = {}
     meta['DATE_RETRIEVED'] = pc.timestamp_str()
     meta['COMMENT'] = uargs.comment
-    for key in ['DATE_RETRIEVED', 'COMMENT']:        
+    for key in ['DATE_RETRIEVED', 'COMMENT']:
         logger.info(f'metadata {key} = {meta[key]}')
     meta['PETAL_ATTRIBUTES'] = other_petal_keys
     meta['PETAL_ALIGNMENTS'] = {}
@@ -297,7 +303,7 @@ try:
         assert2(not(any(missing)), f'some keys are not available for petal {ptl.petal_id}: {missing}')
         posids_ordered = sorted(ptl.app_get('posids'))
         logger.info(f'Now gathering data for {len(posids_ordered)} positioners on petal id {petal_id}...')
-        
+
         # queryable values
         if uargs.zeno_only:
             keys = set(query_keys)
@@ -315,7 +321,7 @@ try:
                     this_dict = {posid: {pc.case.names[enum] for enum in neighbors} for posid, neighbors in this_dict.items()}
             this_list = [this_dict[p] for p in posids_ordered]
             data[key].extend(this_list)
-            
+
         if not uargs.zeno_only:
             # polygons from collider
             logger.info(' ...collecting polygon data...')
@@ -329,7 +335,7 @@ try:
                     this_dict = polys[key]
                     this_list = [str(this_dict[p]) for p in posids_ordered]
                     data[data_key].extend(this_list)
-    
+
             # transformed values
             logger.info(' ...collecting calculated values...')
             offset_keys = ['OFFSET_X', 'OFFSET_Y']
@@ -342,20 +348,20 @@ try:
                 y_out = [c['uv2'][1] for c in coord]
                 data[f'OFFSET_X_{suffix}'].extend(x_out)
                 data[f'OFFSET_Y_{suffix}'].extend(y_out)
-    
-            logger.info(' ...collecting petal-wide values...')        
+
+            logger.info(' ...collecting petal-wide values...')
             # [JHS] As of 2020-11-02, these general collider parameters should be equivalent for
             # any petal. Here, I simply use the last ptl instance from the for loop above.
             meta['COLLIDER_ATTRIBUTES'] = general_collider_keys
             for key in general_collider_keys:
                 meta[key] = getattr2(ptl, 'collider', key)
-            
+
             # petal-wide values
             for key, attr in pos_petal_attr_map.items():
                 value = getattr2(ptl, None, attr)
                 data[key].extend([value] * len(posids_ordered))
             meta['PETAL_ALIGNMENTS'][petal_id] = getattr2(ptl, 'trans', 'petal_alignment')
-                    
+
     logger.info('All data gathered, generating table format...')
     # convert POS_NEIGHBORS eleenmts to lists
     for key in data.keys():     #['POS_NEIGHBORS', 'FIXED_NEIGHBORS']:
@@ -396,17 +402,17 @@ try:
         with open(save_path, mode='w', newline='') as f:
             writer = csv.writer(f)
             writer.writerows(cdata)
-        
+
     else:
         t.write(save_path)
     logger.info(f'Data saved to: {save_path}')
-    
+
     # save a reference to this file in a standard place
     ref_path = pc.fp_calibs_path_cache
     with open(ref_path, mode='w') as file:
         file.write(save_path)
     logger.info(f'File path cached at standard location: {ref_path}')
-    
+
 except Exception as e:
     exception_during_run = e
     logger.error('get_calibrations crashed! See traceback below:')

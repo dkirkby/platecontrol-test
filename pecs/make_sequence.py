@@ -72,7 +72,7 @@ if calibs_file_path == None:
     outdir = pc.dirs['temp_files']
     get_calibs_comment = 'auto-retrieval of calibrations by make_sequence.py'
     print('\nGENERATING NEW CALIBRATIONS FILE')
-    cmd = f'python get_calibrations.py -m "{get_calibs_comment}" -o {outdir} -ptl {uargs.petal_ids}'
+    cmd = f'python get_calibrations.py -m "{get_calibs_comment}" -o {outdir} -ptl {uargs.petal_ids} -nn'
     err = os.system(cmd)
     assert not(err), f'error calling \'{cmd}\''
 if calibs_file_path in {None, 'cache'}:
