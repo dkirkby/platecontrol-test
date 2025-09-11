@@ -465,6 +465,9 @@ class PosCollider(object):
             self.t0[posid] = posmodel.state.read('OFFSET_T')
             self.p0[posid] = posmodel.state.read('OFFSET_P')
             self.keepout_expansions[posid] = {key:posmodel.state.read(key) for key in pc.keepout_expansion_keys}
+            if posmodel.is_linphi:
+                angP = self.keepout_expansions[posid].get('KEEPOUT_EXPANSION_PHI_ANGULAR', 0.0)
+                self.keepout_expansions[posid]['KEEPOUT_EXPANSION_PHI_ANGULAR'] = max(pc.P_zeno_jog, angP)
             classified_retracted = posmodel.state.read('CLASSIFIED_AS_RETRACTED')
             disabled = not posmodel.state.read('CTRL_ENABLED')
             if classified_retracted:

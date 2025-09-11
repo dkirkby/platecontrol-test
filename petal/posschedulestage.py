@@ -12,7 +12,7 @@ class PosScheduleStage(object):
         stats            ... instance of posschedstats for this petal
         power_supply_map ... dict where key = power supply id, value = set of posids attached to that supply
     """
-    def __init__(self, collider, stats, power_supply_map=None, verbose=False, printfunc=None):
+    def __init__(self, collider, stats, power_supply_map=None, verbose=False, printfunc=None, petal=None):
         self.collider = collider # poscollider instance
         self.move_tables = {} # keys: posids, values: posmovetable instances
         self.start_posintTP = {} # keys: posids, values: initial positions at start of stage
@@ -28,6 +28,7 @@ class PosScheduleStage(object):
         self.sweep_continuity_check_stepsize = 4.0 # deg, see PosSweep.check_continuity function
         self.verbose = verbose
         self.printfunc = printfunc
+        self.petal_debug = petal.petal_debug if hasattr(petal, 'petal_debug') else {}
 
     def initialize_move_tables(self, start_posintTP, dtdp, update_only=False):
         """Generates basic move tables for each positioner, starting at position
@@ -60,6 +61,109 @@ class PosScheduleStage(object):
             self.move_tables[posid] = table
             self.start_posintTP[posid] = tuple(start_posintTP[posid])
 
+    def _print_table_diff(self, posid, old_table, new_table):
+        """
+        Print only the differences between two move tables
+        """
+        o_table = {}
+        n_table = {}
+        for k, v in old_table.items():
+            if k in new_table:
+                if v != new_table[k]:
+                    o_table[k] = v
+                    n_table[k] = new_table[k]
+        if o_table:
+            self.printfunc(f'zeno movetable change\nold {posid} table: {str(o_table)}\nnew {posid} table: {str(n_table)}')
+        return
+
+    def rewrite_zeno_move_tables(self, proposed_tables):
+        for posid, table in proposed_tables.items():
+            if table.posmodel.is_linphi:
+                # self.printfunc(f'Rewriting zeno table for {posid}')
+                new_table = self.rewrite_zeno_move_table(table)
+                if new_table is not None:
+                    vrbose = self.petal_debug.get('linphi_verbose')
+                    try:
+                        if vrbose and int(vrbose) > 1:
+                            self._print_table_diff(posid, table.as_dict(), new_table.as_dict())
+                    except TypeError:
+                        pass
+                    proposed_tables[posid] = new_table
+        return proposed_tables
+
+    def rewrite_zeno_move_table(self, table):
+        linphi_table = None
+        if table.posmodel.is_linphi:
+            linphi_table = self._rewrite_linphi_move_table(table)
+        return linphi_table
+
+    def _rewrite_linphi_move_table(self, table, verbose=False):
+#       last_motor_direction is always > 0
+#       last_motor_direction = table.posmodel.linphi_params['LAST_P_DIR']
+        last_motor_direction = 1
+        vrbose = self.petal_debug.get('linphi_verbose')
+        if self.petal_debug.get('compact_linphi'):
+            table.compact()
+        if table.has_phi_motion:
+            new_table = table.copy()
+            idx = 0
+            l_idx = 0
+            if verbose:
+                self.printfunc('Proposed table has phi movement') # DEBUG
+            for row in table.rows:
+                phi_dist = table.get_move(idx, pc.P)
+                theta_dist = table.get_move(idx, pc.T)
+                postpause = table.get_postpause(idx)
+                if phi_dist == 0:
+                    if verbose:
+                        self.printfunc(f'no phi movement in old row {idx}, new row {l_idx}, skipping') # DEBUG
+                    idx += 1
+                    l_idx += 1
+                else:
+                    new_direction = 1 if phi_dist >= 0.0 else -1
+#                   scale_ccw = float(table.posmodel.linphi_params['CCW_SCALE_A'])
+#                   scale_cw = float(table.posmodel.linphi_params['CW_SCALE_A'])
+#                   We don't need the scales here since Petalcontroller will apply them
+                    #NOTE: The first and second moves should have abs(move) >= pc.P_zeno_jog
+                    if last_motor_direction == 1:  # table.posmodel.linphi_params['LAST_P_DIR']:
+                        if new_direction > 0:   # must go negative, then positive
+                            first_move = -pc.P_zeno_jog # / scale_cw
+                            second_move = (pc.P_zeno_jog + phi_dist) # / scale_ccw
+                        else:                       # must go positive, then negative
+                            first_move = (-pc.P_zeno_jog + phi_dist) # / scale_cw
+                            second_move = pc.P_zeno_jog # / scale_ccw
+                    else:
+                        if new_direction > 0:   # must go positive, then negative
+                            first_move = (pc.P_zeno_jog + phi_dist) # / scale_ccw
+                            second_move = -pc.P_zeno_jog # / scale_cw
+                        else:                       # must go positive, then negative
+                            first_move = (-pc.P_zeno_jog + phi_dist) # / scale_cw
+                            second_move = pc.P_zeno_jog # / scale_ccw
+#                   Would need next two lines to prevent banging into hard stops, but should never get here
+#                   if that were going to happen since additional keepout is > jog size
+#                   first_move_limited = self._range_limited_jog(first_move ... and other args)
+#                   second_move_limited = self._range_limited_jog(second_move ... and other args)
+                    if verbose:
+                        self.printfunc(f'original index = {idx}, new indices = {l_idx}, {l_idx+1}') # DEBUG
+                    new_table.set_move(l_idx, pc.P, first_move)
+                    new_table.set_move(l_idx, pc.T, 0.0)
+                    new_table.set_postpause(l_idx, 0)
+                    new_table.insert_new_row(l_idx + 1)
+                    new_table.set_move(l_idx + 1, pc.P, second_move)
+                    new_table.set_move(l_idx + 1, pc.T, theta_dist)
+                    if postpause:
+                        new_table.set_postpause(l_idx + 1, postpause)
+# Second move is always >0, so LAST_P_DIR is always 1, never -1
+#                   table.posmodel.linphi_params['LAST_P_DIR'] = 1 if second_move > 0 else -1  # store new direction
+                    idx += 1
+                    l_idx += 2
+            else:
+                if verbose:
+                    self.printfunc('Proposed table has no phi movement') # DEBUG
+            if idx != l_idx:    # table was modified
+                return new_table
+        return None
+
     def is_not_empty(self):
         """Returns boolean whether the stage is empty of move_tables.
         """
@@ -74,7 +178,7 @@ class PosScheduleStage(object):
             self.move_tables[this_posid].extend(move_table)
         else:
             self.move_tables[this_posid] = move_table
-            
+
     def del_table(self, posid):
         '''Deletes a move table and associated sweep data. This may leave the
         state of self.colliding out of date, until the next find_collisions() call.
@@ -89,12 +193,12 @@ class PosScheduleStage(object):
 
             anneal_time ... Time in seconds over which to spread out moves in this stage
                             to reduce overall power density consumed by the array.
-                             
+
             suppress_automoves ... Boolean, if True, don't include auto-generated final
                                    creep and antibacklash moves in the move times. Typically
                                    you want this True only for stages which are not the last
                                    one in the sequence.
-            
+
             mode ... 'filled' --> try to most efficiently fill time with moves
                      'ramped' --> try to ramp up/down the power (takes more time)
 
@@ -112,7 +216,7 @@ class PosScheduleStage(object):
         orig_max_time = max(sorted_times)
         anneal_window = sum(sorted_times) / len(sorted_times) / pc.anneal_density[mode]
         anneal_window = max(anneal_window, orig_max_time)  # for case of very large outlier
-        
+
         if mode == 'filled':
             def first_within(x, vec):
                 for i, test in enumerate(vec):
@@ -135,7 +239,7 @@ class PosScheduleStage(object):
                         prepause += times2[i]
                         del posids[i]
                         del times2[i]
-                        
+
         elif mode == 'ramped':
             resolution = 0.1 # sec
             for map_posids in self._power_supply_map.values():
@@ -189,15 +293,15 @@ class PosScheduleStage(object):
                 'off'    ... don't freeze, even if the path adjustment options all fail to resolve collisions
                 'forced' ... only freeze, and *must* do so
                 'forced_recursive' ... like 'forced', then closes any follow-on neighbor collisions
-                
+
             do_not_move ... set of posids which are *not* allowed to be automatically
                             moved (i.e. like moved out of the way) of posid
 
         Returns a tuple:
-            
+
             item 0 ... set containing the posids of any robot(s) whose move
                        tables were adjusted in the course of the function call
-                       
+
             item 1 ... set of only those posids which were specifically "frozen"
 
         With freezing == 'off' or 'on', the path adjustment algorithm goes through a
@@ -212,13 +316,13 @@ class PosScheduleStage(object):
 
         With freezing == 'forced', we skip calculating the various path adjustment options,
         and instead go straight to freezing the positioner before it collides.
-        
+
         With freezing == 'forced_recursive', it is just like 'forced', plus at the end
         we look for any follow-on collisions among neighbors (due to a neighbor continuing to
         move, or a new side-effect collision). These will be recursively searched out and
         resolved by more forced freezing. This is intended as the final adjustment method,
         to definitively prevent any collisions including side-effects.
-        
+
         The timing of a neighbor's motion path may be adjusted as well by this
         function, but not the geometric path that the neighbor follows.
 
@@ -238,16 +342,17 @@ class PosScheduleStage(object):
             methods = pc.nonfreeze_adjustment_methods
         else:
             methods = pc.all_adjustment_methods
-        for method in methods:        
+        for method in methods:
             collision_neighbor = self.sweeps[posid].collision_neighbor
             proposed_tables = self._propose_path_adjustment(posid, method, do_not_move)
+#           proposed_tables = self.rewrite_zeno_move_tables(proposed_tables)
             colliding_sweeps, all_sweeps = self.find_collisions(proposed_tables)
             should_accept = not(colliding_sweeps) or freezing in {'forced','forced_recursive'}
             should_accept &= any(proposed_tables) # nothing to accept if no proposed tables were generated
             if should_accept:
                 self.move_tables.update(proposed_tables)
                 adjusted.update(proposed_tables.keys())
-                
+
                 # search for any side effect new collisions
                 proposed = set(proposed_tables.keys())
                 could_have_changed = {posid, collision_neighbor}
@@ -260,7 +365,7 @@ class PosScheduleStage(object):
                 all_to_store = {p:s for p,s in all_recheck.items() if p in tables_to_recheck.keys()}
                 col_to_store.update({p:s for p,s in colliding_sweeps.items() if p in proposed})
                 all_to_store.update({p:s for p,s in all_sweeps.items() if p in proposed})
-                
+
                 # determine if collision was resolved (for statistics tracking)
                 if stats_enabled:
                     old_collision_id = self._collision_id(posid,collision_neighbor)
@@ -273,12 +378,12 @@ class PosScheduleStage(object):
                         self.stats.add_collisions_resolved(posid, method, {old_collision_id})
 
                 # store results
-                old_colliding = self.colliding # note how sequence here emphasizes that this must occur before store_collision_finding_results(), which affects self.colliding. in a perfect world, I would re-factor functionally to remove the state-dependence [JHS]                
+                old_colliding = self.colliding # note how sequence here emphasizes that this must occur before store_collision_finding_results(), which affects self.colliding. in a perfect world, I would re-factor functionally to remove the state-dependence [JHS]
                 self.store_collision_finding_results(col_to_store, all_to_store)
                 if method == 'freeze':
                     self.sweeps[posid].register_as_frozen() # needs to occur after storing results above
                     frozen.add(posid)
-               
+
                 # recursively-forced freezing
                 if freezing == 'forced_recursive':
                     newly_colliding = set(col_to_store.keys()).difference(old_colliding)
@@ -292,9 +397,9 @@ class PosScheduleStage(object):
                         if p in self.move_tables: # does p have any move_table to be frozen?
                             if not self.move_tables[p].is_motionless: # does that table have any contents inside to be frozen?
                                 freeze_is_possible = True
-                        if freeze_is_possible: 
+                        if freeze_is_possible:
                             newly_adjusted, recursed_newly_frozen = self.adjust_path(p, freezing='forced_recursive') # recursively close out any side-effect new collisions
-                            adjusted.update(newly_adjusted) 
+                            adjusted.update(newly_adjusted)
                             frozen.update(recursed_newly_frozen)
                         else:
                             self.printfunc(' --> no further freezing possible on ' + str(p) + ' --- already motionless')
@@ -399,7 +504,7 @@ class PosScheduleStage(object):
         if self.stats.is_enabled():
             found = {self._collision_id(posid, sweep.collision_neighbor) for posid, sweep in colliding_sweeps.items()}
             self.stats.add_collisions_found(found)
-            
+
     def sweeps_continuity_check(self):
         """Returns set of posids for any whose sweeps were found to be discontinous.
         """
@@ -440,7 +545,7 @@ class PosScheduleStage(object):
 
              'freeze'      ... Positioner is halted prior to the collision, and no attempt
                                is made for its final target.
-                               
+
           do_not_move ... see comments in adjust_path() docstr
 
         The subscript 'X' in many of the adjustment methods above refers to the
@@ -482,13 +587,13 @@ class PosScheduleStage(object):
         unmoving_neighbor = neighbor not in self.move_tables or neighbor in do_not_move
         if unmoving_neighbor and method in pc.useless_with_unmoving_neighbor:
             return {}
-        
+
         # table that will be adjusted
         tables = {posid: self._get_or_generate_table(posid,should_copy=True)}
         tables_data = {}
         if method == 'freeze' or 'repel' in method:
             tables_data[posid] = tables[posid].for_schedule()
-        
+
         # freeze method
         if method == 'freeze':
             for row_idx in reversed(range(tables[posid].n_rows)):
@@ -505,7 +610,7 @@ class PosScheduleStage(object):
             if tables[posid].n_rows == 0:
                 tables[posid].set_move(0, 0, 0)
             return tables
-        
+
         # get neighbor table
         posmodels = {posid:self.collider.posmodels[posid], neighbor:self.collider.posmodels[neighbor]}
         neighbor_can_move = posmodels[neighbor].is_enabled and not self.sweeps[neighbor].is_frozen and neighbor not in do_not_move
@@ -520,13 +625,13 @@ class PosScheduleStage(object):
             return {} # no point in pausing if neighbor never moves
         else:
             neighbor_clearance_time = 0
-            
+
         # pause method
         if method == 'pause':
             tables[posid].insert_new_row(0)
             tables[posid].set_prepause(0,neighbor_clearance_time)
             return {posid:tables[posid]} # exclude neighbor here, since nothing being done to it
-        
+
         # retract, rot, extend, repel methods: calculate jog distances
         max_abs_jog = abs(self._max_jog[method])
         jogs = {} # will hold distance(s) to move away from target and then back toward target
@@ -563,8 +668,8 @@ class PosScheduleStage(object):
             self.printfunc('Error: unknown path adjustment method \'' + str(method) + '\'')
             return {}
         for p in jogs:
-            jog_times[p] = posmodels[p].true_move(axisid=axis, distance=jogs[p], allow_cruise=True, limits=None, init_posintTP=None)['move_time']     
-        
+            jog_times[p] = posmodels[p].true_move(axisid=axis, distance=jogs[p], allow_cruise=True, limits=None, init_posintTP=None)['move_time']
+
         # apply jogs and associated pauses to tables
         if 'repel' in method:
             wait_for_posid_to_jog = 0
@@ -596,7 +701,7 @@ class PosScheduleStage(object):
             new_final_idx = tables[posid].n_rows
             tables[posid].set_move(new_final_idx, axis, -jogs[posid])
         return tables
-    
+
     @staticmethod
     def _range_limited_jog(nominal, direction, start, limits):
         """Returns a range-limited jog distance.

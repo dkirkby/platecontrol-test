@@ -17,10 +17,14 @@ import os
 import random
 import numpy as np
 from astropy.table import Table as AstropyTable
+import csv
 
 # For using simulated petals at KPNO (PETAL90x)
 # Set KPNO_SIM to True
 KPNO_SIM = False
+
+# For using debug_petal dictionary and associated functions
+DEBUG = True
 
 try:
     from DOSlib.positioner_index import PositionerIndex
@@ -99,8 +103,6 @@ class Petal(object):
 
         # specify an alternate to print (useful for logging the output)
         self.printfunc = printfunc
-        self.printfunc(f'Running plate_control version: {pc.code_version}')
-        self.printfunc(f'poscollider used: {poscollider.__file__}')
         pc.printfunc = self.printfunc
 
         # petal setup
@@ -155,12 +157,28 @@ class Petal(object):
         # sim_fail_freq: injects some occasional simulated hardware failures. valid range [0.0, 1.0]
         self.sim_fail_freq = {'send_tables': 0.0}
 
+        self.printfunc(f'Running plate_control version: {pc.code_version}')
+        self.printfunc(f'Running petal version: {self.petal_version()}')
+        self.printfunc(f'poscollider used: {poscollider.__file__}')
+
         if not(self.simulator_on):
             import petalcomm
             self.comm = petalcomm.PetalComm(self.petalbox_id,
                                             user_interactions_enabled=user_interactions_enabled,
                                             printfunc=self.printfunc)
             self.comm.pbset('non_responsives', 'clear') #reset petalcontroller's list of non-responsive canids
+
+            # get petalcontroller version
+            try:
+                pcver = 'unknown'
+                if self.comm.is_connected():
+                    ret = self.comm.pbget('version')
+                    if 'FAILED' not in ret:
+                        pcver = str(ret)
+                self.printfunc(f'Petalcontroller {self.petalbox_id} running version: {pcver}')
+            except Exception as e:
+                self.printfunc('init: Exception calling petalcontroller pbget version: %s' % str(e))
+
             # get ops_state from petalcontroller
             try:
                 o = self.comm.ops_state()
@@ -243,7 +261,40 @@ class Petal(object):
         for i in range(self.n_strikes, 0, -1):
             self.strikes[f'strike_{i}'] = set()
 
+        self.petal_debug = {'linphi_verbose': 1,            # Set 'linphi_verbose' to 2 for more verbose linphi related output
+                            'cancel_anneal_verbose': True } # Set 'cancel_anneal_verbose'to False if no messages about canceling annealing are desired
+                                                            # Set 'compact_linphi' to True to compact move tables before conversion for LinPhi operation
 
+    def petal_version(self):
+        """
+        Returns string PETAL version id
+        """
+        version = 'PETAL_kpnopetalv2_v2.09'  # MUST be changed manually!
+        if self.simulator_on:
+            return version+'-Sim'
+        else:
+            return version
+
+    if DEBUG:
+        def get_petal_debug(self):
+            """
+            Returns petal_debug dictionary
+            """
+            return self.petal_debug
+
+        def set_petal_debug(self, key, value):
+            """
+            set key and value in petal_debug dictionary
+            """
+            self.petal_debug[key] = value
+            return
+
+        def del_petal_debug(self, key):
+            """
+            remove key from petal_debug dictionary
+            """
+            self.petal_debug.pop(key, None)
+            return
 
     def is_pc_connected(self):
         if self.simulator_on:
@@ -313,7 +364,8 @@ class Petal(object):
                 alt_move_adder=self._add_to_altered_states,
                 alt_calib_adder=self._add_to_altered_calib_states)
             self.posmodels[posid] = PosModel(state=self.states[posid],
-                                             petal_alignment=self.alignment)
+                                             petal_alignment=self.alignment,
+                                             printfunc=self.printfunc)
             self.devices[self.states[posid]._val['DEVICE_LOC']] = posid
             if KPNO_SIM:
                 pos = posindex.find_by_arbitrary_keys(DEVICE_ID=posid)
@@ -799,6 +851,9 @@ class Petal(object):
                 busid = posmodel.busid
                 p = {key:posmodel.state._val[key] for key in parameter_keys}
                 currents = tuple([p[key] for key in ['CURR_SPIN_UP_DOWN','CURR_CRUISE','CURR_CREEP','CURR_HOLD']])
+#               speedparams = tuple([p[key] for key in ['LIN_T','LIN_P']])
+#               msg = 'speed parameters: ' + str(speedparams)   # zeno
+#               self.printfunc(msg)                             # zeno
                 currents_by_busid[busid][canid] = [currents, currents]
                 periods_by_busid[busid][canid] = (p['CREEP_PERIOD'], p['CREEP_PERIOD'], p['SPINUPDOWN_PERIOD'])
                 if self.verbose:
@@ -930,7 +985,8 @@ class Petal(object):
         next_allowed_move_time = time.time() - delay + 0.001
         for n in range(n_repeats):
             for target in targets:
-                assert len(target) == 2 and all([isinstance(val, (int, float, np.integer, np.float)) for val in target]), f'dance: invalid target {target}'
+                #assert len(target) == 2 and all([isinstance(val, (int, float, np.integer, np.float)) for val in target]), f'dance: invalid target {target}'
+                assert len(target) == 2 and all([isinstance(val, (int, float)) for val in target]), f'dance: invalid target {target}'                
                 count += 1
                 sleep_time = next_allowed_move_time - time.time()
                 if sleep_time > 0:
@@ -1906,7 +1962,7 @@ class Petal(object):
         '''
         import operator
         position_keys = set(pc.single_coords)
-        state_keys = set(pc.calib_keys) | {'POS_P', 'POS_T', 'CTRL_ENABLED'}
+        state_keys = set(pc.calib_keys) | {'POS_P', 'POS_T', 'CTRL_ENABLED', 'zeno_motor_p', 'sz_cw_p', 'sz_ccw_p', 'zeno_motor_t', 'sz_cw_t', 'sz_ccw_t'}
         state_keys -= pc.fiducial_calib_keys  # fiducial data not currently supported
         constants_keys = set(pc.constants_keys)
         model_keys = set(pc.posmodel_keys)
@@ -1995,7 +2051,7 @@ class Petal(object):
             out = f'total entries found = {len(found)}\n{out}'
         return out
 
-    def quick_plot(self, posids='all', include_neighbors=True, path=None, viewer='default', fmt='png', arcP=False):
+    def quick_plot(self, posids='all', include_neighbors=True, path=None, viewer=None, fmt='png', arcP=False):
         '''Graphical view of the current expected positions of one or many positioners.
 
         INPUTS:  posids ... single posid or collection of posids to be plotted (defaults to all)
@@ -2011,105 +2067,118 @@ class Petal(object):
 
         OUTPUT:  path of output plot file will be returned
         '''
-        default_viewers = {'nt': 'explorer',
-                           'mac': 'open',  # 2020-10-22 [JHS] I do not have a mac on which to test this
-                           'posix': 'eog'}
-        import matplotlib.pyplot as plt
-        c = self.collider  # just for brevity below
-        posids = self._validate_posids_arg(posids)
-        if include_neighbors:
-            for posid in posids.copy():
-                posids |= c.pos_neighbors[posid]
-        plt.ioff()
-        x0 = [c.x0[posid] for posid in posids]
-        y0 = [c.y0[posid] for posid in posids]
-        x_span = max(x0) - min(x0)
-        y_span = max(y0) - min(y0)
-        x_inches = max(8, np.ceil(x_span/16))
-        y_inches = max(6, np.ceil(y_span/16))
-        fig = plt.figure(num=0, figsize=(x_inches, y_inches), dpi=150)
+        try:
+            default_viewers = {'nt': 'explorer',
+                               'mac': 'open',  # 2020-10-22 [JHS] I do not have a mac on which to test this
+                               'posix': 'eog', 'debian': 'display'}
+            import matplotlib.pyplot as plt
+            plt.switch_backend('Agg')
+            c = self.collider  # just for brevity below
+            posids = self._validate_posids_arg(posids)
+            if include_neighbors:
+                for posid in posids.copy():
+                    posids |= c.pos_neighbors[posid]
+            plt.ioff()
+            x0 = [c.x0[posid] for posid in posids]
+            y0 = [c.y0[posid] for posid in posids]
+            x_span = max(x0) - min(x0)
+            y_span = max(y0) - min(y0)
+            x_inches = max(8, np.ceil(x_span/16))
+            y_inches = max(6, np.ceil(y_span/16))
+            fig = plt.figure(num=0, figsize=(x_inches, y_inches), dpi=150)
 
-        # 2020-10-22 [JHS] current implementation of labeling in legend is brittle,
-        # in that it relies on colors to determine which label to apply. Better
-        # implementation would be to combine legend labels into named styles.
-        color_labels = {'green': 'normal',
-                        'orange': 'disabled',
-                        'red': 'overlap',
-                        'black': 'poslocTP',
-                        'gray': 'posintT=0'}
-        label_order = [x for x in color_labels.values()]
-        def plot_poly(poly, style):
-            pts = poly.points
-            color = style['edgecolor']
-            if color in color_labels:
-                label = color_labels[color]
-                del color_labels[color]
-            else:
-                label = None
-            plt.plot(pts[0], pts[1], linestyle=style['linestyle'], linewidth=style['linewidth'], color=style['edgecolor'], label=label)
-        overlaps = set(self.get_overlaps(posids=posids, as_dict=True, arcP=arcP))
-        for posid in posids:
-            locTP = self.posmodels[posid].expected_current_poslocTP
-            polys = {'Eo': c.Eo_polys[posid],
-                     'line t0': c.line_t0_polys[posid],
-                     'central body': c.place_central_body(posid, locTP[pc.T]),
-                     'arm lines': c.place_arm_lines(posid, locTP),
-                     'phi arm': c.place_phi_arm(posid, locTP),
-                     'ferrule': c.place_ferrule(posid, locTP),
-                     }
-            pos_parts = {'central body'}
-            if arcP:
-                polys['phi arc'] = c.place_phi_arc(posid, locTP[0])
-                pos_parts |= {'phi arc'}
-            else:
-                pos_parts |= {'phi arm', 'ferrule'}
-            styles = {key: pc.plot_styles[key].copy() for key in polys}
-            enabled = self.posmodels[posid].is_enabled
-            if self.posmodels[posid].classified_as_retracted:
-                styles['Eo'] = pc.plot_styles['Eo bold'].copy()
-                for key in pos_parts:
-                    styles[key]['edgecolor'] = pc.plot_styles['Eo']['edgecolor']
-                pos_parts = {'Eo'}
-            for key, poly in polys.items():
-                style = styles[key]
-                if key in pos_parts:
-                    if posid in overlaps:
-                        style['edgecolor'] = 'red'
-                    if not enabled:  # intentionally overrides overlaps
-                        style['edgecolor'] = 'orange'
-                plot_poly(poly, style)
-            plt.text(x=c.x0[posid], y=c.y0[posid],
-                     s=f'{posid}\n{self.posmodels[posid].deviceloc:03d}',
-                     family='monospace', horizontalalignment='center', size='x-small')
-        plt.axis('equal')
-        xlim = plt.xlim()  # will restore this zoom window after plotting petal and gfa
-        ylim = plt.ylim()  # will restore this zoom window after plotting petal and gfa
-        plot_poly(c.keepout_PTL, pc.plot_styles['PTL'])
-        plot_poly(c.keepout_GFA, pc.plot_styles['GFA'])
-        plt.xlim(xlim)
-        plt.ylim(ylim)
-        plt.xlabel('flat x (mm)')
-        plt.ylabel('flat y (mm)')
-        basename = f'posplot_ptlid{self.petal_id:02}_{pc.filename_timestamp_str()}.{fmt}'
-        plt.title(f'{pc.timestamp_str()}  /  {basename}\npetal_id {self.petal_id}  /  petal_loc {self.petal_loc}')
-        handles, labels = plt.gca().get_legend_handles_labels()
-        handles = [handles[labels.index(L)] for L in label_order if L in labels]
-        labels = [L for L in label_order if L in labels]
-        plt.legend(handles, labels)
-        if not path:
-            path = pc.dirs['temp_files']
-        path = os.path.join(path, basename)
-        plt.tight_layout()
-        plt.savefig(path)
-        plt.close(fig)
-        if viewer and viewer not in {'None','none','False','false','0'}:
-            if viewer == 'default':
-                if os.name in default_viewers:
-                    viewer = default_viewers[os.name]
+            # 2020-10-22 [JHS] current implementation of labeling in legend is brittle,
+            # in that it relies on colors to determine which label to apply. Better
+            # implementation would be to combine legend labels into named styles.
+            color_labels = {'green': 'normal',
+                            'orange': 'disabled',
+                            'red': 'overlap',
+                            'black': 'poslocTP',
+                            'gray': 'posintT=0'}
+            label_order = [x for x in color_labels.values()]
+            def plot_poly(poly, style):
+                pts = poly.points
+                color = style['edgecolor']
+                if color in color_labels:
+                    label = color_labels[color]
+                    del color_labels[color]
                 else:
-                    self.printfunc(f'quick_plot: no default image viewer setting available for current os={os.name}')
-            os.system(f'{viewer} {path} &')
-        return path
+                    label = None
+                plt.plot(pts[0], pts[1], linestyle=style['linestyle'], linewidth=style['linewidth'], color=style['edgecolor'], label=label)
+            overlaps = set(self.get_overlaps(posids=posids, as_dict=True, arcP=arcP))
+            for posid in posids:
+                locTP = self.posmodels[posid].expected_current_poslocTP
+                polys = {'Eo': c.Eo_polys[posid],
+                         'line t0': c.line_t0_polys[posid],
+                         'central body': c.place_central_body(posid, locTP[pc.T]),
+                         'arm lines': c.place_arm_lines(posid, locTP),
+                         'phi arm': c.place_phi_arm(posid, locTP),
+                         'ferrule': c.place_ferrule(posid, locTP),
+                         }
+                pos_parts = {'central body'}
+                if arcP:
+                    polys['phi arc'] = c.place_phi_arc(posid, locTP[0])
+                    pos_parts |= {'phi arc'}
+                else:
+                    pos_parts |= {'phi arm', 'ferrule'}
+                styles = {key: pc.plot_styles[key].copy() for key in polys}
+                enabled = self.posmodels[posid].is_enabled
+                if self.posmodels[posid].classified_as_retracted:
+                    styles['Eo'] = pc.plot_styles['Eo bold'].copy()
+                    for key in pos_parts:
+                        styles[key]['edgecolor'] = pc.plot_styles['Eo']['edgecolor']
+                    pos_parts = {'Eo'}
+                for key, poly in polys.items():
+                    style = styles[key]
+                    if key in pos_parts:
+                        if posid in overlaps:
+                            style['edgecolor'] = 'red'
+                        if not enabled:  # intentionally overrides overlaps
+                            style['edgecolor'] = 'orange'
+                    plot_poly(poly, style)
+                plt.text(x=c.x0[posid], y=c.y0[posid],
+                         s=f'{posid}\n{self.posmodels[posid].deviceloc:03d}',
+                         family='monospace', horizontalalignment='center', size='x-small')
+            plt.axis('equal')
+            xlim = plt.xlim()  # will restore this zoom window after plotting petal and gfa
+            ylim = plt.ylim()  # will restore this zoom window after plotting petal and gfa
+            plot_poly(c.keepout_PTL, pc.plot_styles['PTL'])
+            plot_poly(c.keepout_GFA, pc.plot_styles['GFA'])
+            plt.xlim(xlim)
+            plt.ylim(ylim)
+            plt.xlabel('flat x (mm)')
+            plt.ylabel('flat y (mm)')
+            basename = f'posplot_ptlid{self.petal_id:02}_{pc.filename_timestamp_str()}.{fmt}'
+            plt.title(f'{pc.timestamp_str()}  /  {basename}\npetal_id {self.petal_id}  /  petal_loc {self.petal_loc}')
+            handles, labels = plt.gca().get_legend_handles_labels()
+            handles = [handles[labels.index(L)] for L in label_order if L in labels]
+            labels = [L for L in label_order if L in labels]
+            plt.legend(handles, labels)
+            if not path:
+                path = pc.dirs['temp_files']
+            path = os.path.join(path, basename)
+            plt.tight_layout()
+            plt.savefig(path)
+            plt.close(fig)
+            if viewer and viewer not in {'None','none','False','false','0'}:
+                if viewer == 'default':
+                    if os.name in default_viewers:
+                        viewer = default_viewers[os.name]
+                        if os.name =='posix':
+                            try:
+                                import distro
+                                if 'debian' in distro.id():
+                                    self.printfunc('Using display command as viewer')
+                                    viewer = 'display'
+                            except:
+                                pass
+                    else:
+                        self.printfunc(f'quick_plot: no default image viewer setting available for current os={os.name}')
+                os.system(f'{viewer} {path} &')
+            return path
+        except Exception as e:
+            self.printfunc(f'quick_plot: Exception: {str(e)}')
+            return None
 
     def get_overlaps(self, posids='all', as_dict=False, arcP=False):
         '''Returns a string describing all cases where positioners' current expected
@@ -2466,6 +2535,19 @@ class Petal(object):
         if disabled:
             self.printfunc(f'WARNING: {len(disabled)} positioners disabled due to communication error: {disabled}')
 
+    def temporary_disable_positioners_reason(self, posids, reason, auto_disabling_on=True):
+        """Receives a list of positioners that should be disabled, along with the reason.
+        (Optionally) automatically disables positioners to remove them from future send_move_tables attempts.
+        """
+        disabled = set()
+        for posid in posids:
+            if auto_disabling_on and self.posmodels[posid].is_enabled:
+                accepted = self.set_posfid_val(posid, 'CTRL_ENABLED', False, check_existing=True, comment='auto-disabled due to {reason}')
+                if accepted:
+                    disabled.add(posid)
+        if disabled:
+            self.printfunc(f'WARNING: {len(disabled)} positioners disabled due to {reason}: {disabled}')
+
     def _clear_temporary_state_values(self):
         '''Clear out any existing values in the state objects that were only temporarily
         held until we could get the state committed to the log / db.
@@ -2652,7 +2734,7 @@ class Petal(object):
         '''Print out a message for one posid and also store the message to its
         log note field.
         '''
-        if self.verbose:
+        if self.verbose or (self.petal_debug.get('linphi_verbose') and self.posmodels[posid].is_linphi):
             self.printfunc(f'{posid}: {msg}')
         self.set_posfid_val(posid, 'LOG_NOTE', msg)
 

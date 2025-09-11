@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+plt.switch_backend('Agg')
 import os
 import time
 import posconstants as pc

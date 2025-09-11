@@ -221,6 +221,11 @@ class PosSchedStats(object):
         """Increment requests accepted count."""
         self.numbers['n requests accepted'][-1] += 1
     
+    def sub_request_accepted(self):
+        """Deccrement requests accepted count."""
+        if self.numbers['n requests accepted'][-1] > 0:
+            self.numbers['n requests accepted'][-1] -= 1
+    
     def add_table_matching_request(self):
         """Increment number of tables matching their original requests."""
         self.numbers['n tables achieving requested-and-accepted targets'][-1] += 1

@@ -70,8 +70,8 @@ valid_commands.update(homing_commands)
 is_float = lambda x: isinstance(x, (float, np.floating))
 is_int = lambda x: isinstance(x, (int, np.integer))
 is_number = lambda x: is_float(x) or is_int(x)
-is_bool = lambda x: isinstance(x, (bool, np.bool, np.bool_))
-is_string = lambda x: isinstance(x, (str, np.str))
+is_bool = lambda x: isinstance(x, (bool))
+is_string = lambda x: isinstance(x, (str))
 
 move_idx_key = 'move_idx'
 get_datestr = lambda: datetime.datetime.now().isoformat(sep=' ', timespec='seconds')

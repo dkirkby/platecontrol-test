@@ -10,6 +10,8 @@ parser.add_argument('-ptl', '--petal_ids', type=str, default='kpno', help='Comma
 parser.add_argument('-o', '--outdir', type=str, default='.', help='Path to directory where to save output file. Defaults to current dir.')
 parser.add_argument('-m', '--comment', type=str, default='', help='Comment string which will be included in output file metadata.')
 parser.add_argument('-dl', '--disable_logger', action='store_true', help='Disable logging to disk.')
+parser.add_argument('-az', '--add_zeno', action='store_true', help='Add Zeno parameters')
+parser.add_argument('-zo', '--zeno_only', action='store_true', help='Retrieve Zeno parameters only')
 parser.add_argument('-nn', '--no_neighbors', action='store_true', help='Do not record POS_NEIGHBORS or FIXED_NEIGHBROS if using a newer version of astropy (>=5.0.0)')
 uargs = parser.parse_args()
 
@@ -85,11 +87,24 @@ query_keys = {'POS_ID': 'unique serial id number of fiber positioner',
               'OBS_X': 'current x position in global coordinates (a.k.a. "CS5" or "x_fp") as transformed from (POS_T, POS_P)',
               'OBS_Y': 'current y position in global coordinates (a.k.a. "CS5" or "y_fp") as transformed from (POS_T, POS_P)',
               }
+zeno_query_keys = {'ZENO_MOTOR_P': 'boolean of whether phi motor is ZENO',
+                   'SZ_CW_P': 'scale factor for zeno phi axis in clockwise direction',
+                   'SZ_CCW_P': 'scale factor for zeno phi axis in counter-clockwise direction',
+                   'ZENO_MOTOR_T': 'boolean of whether theta motor is ZENO',
+                   'SZ_CW_T': 'scale factor for zeno theta axis in clockwise direction',
+                   'SZ_CCW_T': 'scale factor for zeno theta axis in counter-clockwise direction'}
 query_keys_map = {'PTL_X': 'ptlX',
                   'PTL_Y': 'ptlY',
                   'OBS_X': 'obsX',
                   'OBS_Y': 'obsY',
                   }
+
+if uargs.add_zeno:
+    query_keys.update(zeno_query_keys)
+
+if uargs.zeno_only:
+    query_keys = {'POS_ID': 'unique serial id number of fiber positioner'}
+    query_keys.update(zeno_query_keys)
 
 # petal-wide keys for storage in positioner data rows
 pos_petal_keys = {'PETAL_ID': 'unique serial id number of petal',
@@ -108,7 +123,7 @@ keepout_T_note = f'central body (theta) polygon {flat_note}'
 keepout_P_note = f'eccentric body (phi) keepout polygon {flat_note}'
 general_collider_keys = {'timestep': '[sec] quantization when sweeping polygons through rotation schedules, to check for collisions',
                          'Eo_phi': '[deg] poslocP angle (poslocP = POS_P + OFFSET_P) above which phi is defined to be within envelope "Eo" (i.e. retracted)',
-                         'Eo_radius_with_margin': '[mm] when a positioner is CLASSIFED_AS_RETRACTED, neighbor polygons not allowed to enter this circle', 
+                         'Eo_radius_with_margin': '[mm] when a positioner is CLASSIFED_AS_RETRACTED, neighbor polygons not allowed to enter this circle',
                          }
 collider_general_poly_keys = {'general_keepout_T': f'basic {keepout_T_note}',
                               'general_keepout_P': f'basic {keepout_P_note}',
@@ -150,19 +165,20 @@ query_keys_map.update(range_keys_map2)
 all_pos_keys = {}
 all_pos_keys.update(pos_petal_keys)
 all_pos_keys.update(query_keys)
-all_pos_keys.update(collider_query_keys)
-all_pos_keys.update(collider_pos_poly_keys)
-all_pos_keys.update(offset_variant_keys)
-all_pos_keys.update(range_keys)
-all_pos_keys.update(range_keys2)
-angular_keys = {'POS_T', 'POS_P', 'OFFSET_T', 'OFFSET_P', 'PHYSICAL_RANGE_T', 'PHYSICAL_RANGE_P',
-                'KEEPOUT_EXPANSION_PHI_ANGULAR', 'KEEPOUT_EXPANSION_THETA_ANGULAR'}
-angular_keys |= set(range_keys) | set(range_keys2)
-mm_keys = {'LENGTH_R1', 'LENGTH_R2', 'OFFSET_X', 'OFFSET_Y', 'OBS_X', 'OBS_Y', 'PTL_X', 'PTL_Y',
-           'KEEPOUT_EXPANSION_PHI_RADIAL', 'KEEPOUT_EXPANSION_THETA_RADIAL'}
-mm_keys |= set(offset_variant_keys)
-units = {key: 'deg' for key in angular_keys}
-units.update({key: 'mm' for key in mm_keys})
+if not uargs.zeno_only:
+    all_pos_keys.update(collider_query_keys)
+    all_pos_keys.update(collider_pos_poly_keys)
+    all_pos_keys.update(offset_variant_keys)
+    all_pos_keys.update(range_keys)
+    all_pos_keys.update(range_keys2)
+    angular_keys = {'POS_T', 'POS_P', 'OFFSET_T', 'OFFSET_P', 'PHYSICAL_RANGE_T', 'PHYSICAL_RANGE_P',
+                    'KEEPOUT_EXPANSION_PHI_ANGULAR', 'KEEPOUT_EXPANSION_THETA_ANGULAR'}
+    angular_keys |= set(range_keys) | set(range_keys2)
+    mm_keys = {'LENGTH_R1', 'LENGTH_R2', 'OFFSET_X', 'OFFSET_Y', 'OBS_X', 'OBS_Y', 'PTL_X', 'PTL_Y',
+               'KEEPOUT_EXPANSION_PHI_RADIAL', 'KEEPOUT_EXPANSION_THETA_RADIAL'}
+    mm_keys |= set(offset_variant_keys)
+    units = {key: 'deg' for key in angular_keys}
+    units.update({key: 'mm' for key in mm_keys})
 
 # identifying fields with polygon data
 polygons = 'KEEPOUT_T', 'KEEPOUT_P', 'general_keepout_T', 'general_keepout_P'
@@ -236,7 +252,7 @@ else:
                           printfunc=logger.info,
                           )
         ptls[petal_id] = ptl
-        
+
 def getattr2(ptl, module_name, attr):
     '''Wrapper around getattr. Specifically for getting a property from submodules
     petal. Because when online this is behind the DOS proxy wall and so requires
@@ -247,7 +263,7 @@ def getattr2(ptl, module_name, attr):
         return ptl.app_get(s)
     module = getattr(ptl, module_name) if module_name else ptl
     return getattr(module, attr)
-    
+
 
 # Most of the remainder is enclosed in a try so that we can shut down PetalApps
 # at the end, even if a crash occurs before that.
@@ -275,7 +291,7 @@ try:
     meta = {}
     meta['DATE_RETRIEVED'] = pc.timestamp_str()
     meta['COMMENT'] = uargs.comment
-    for key in ['DATE_RETRIEVED', 'COMMENT']:        
+    for key in ['DATE_RETRIEVED', 'COMMENT']:
         logger.info(f'metadata {key} = {meta[key]}')
     meta['PETAL_ATTRIBUTES'] = other_petal_keys
     meta['PETAL_ALIGNMENTS'] = {}
@@ -287,9 +303,12 @@ try:
         assert2(not(any(missing)), f'some keys are not available for petal {ptl.petal_id}: {missing}')
         posids_ordered = sorted(ptl.app_get('posids'))
         logger.info(f'Now gathering data for {len(posids_ordered)} positioners on petal id {petal_id}...')
-        
+
         # queryable values
-        keys = set(query_keys) | set(collider_query_keys)
+        if uargs.zeno_only:
+            keys = set(query_keys)
+        else:
+            keys = set(query_keys) | set(collider_query_keys)
         logger.info(f' ...collecting calib data for {len(keys)} queryable fields...')
         for key in keys:
             if key in query_keys:
@@ -302,69 +321,98 @@ try:
                     this_dict = {posid: {pc.case.names[enum] for enum in neighbors} for posid, neighbors in this_dict.items()}
             this_list = [this_dict[p] for p in posids_ordered]
             data[key].extend(this_list)
-            
-        # polygons from collider
-        logger.info(' ...collecting polygon data...')
-        polys = ptl.get_collider_polygons()
-        collider_pos_attr_map_inverted = {v:k for k,v in collider_pos_attr_map.items()}
-        for key, val in polys.items():
-            if key in collider_general_poly_keys:
-                meta[key] = str(polys[key])
-            else:
-                data_key = collider_pos_attr_map_inverted[key]
-                this_dict = polys[key]
-                this_list = [str(this_dict[p]) for p in posids_ordered]
-                data[data_key].extend(this_list)
-    
-        # transformed values
-        logger.info(' ...collecting calculated values...')
-        offset_keys = ['OFFSET_X', 'OFFSET_Y']
-        offsets = {key: ptl.quick_query(key=key, mode='iterable') for key in offset_keys}
-        flat_offset_xy = {posid: tuple(offsets[key][posid] for key in offset_keys) for posid in posids_ordered}
-        for suffix, coord_sys in offset_variants.items():
-            coord = [{'posid': posid, 'uv1': flat_offset_xy[posid]} for posid in posids_ordered]
-            coord = ptl.transform(cs1='flatXY', cs2=coord_sys, coord=coord)
-            x_out = [c['uv2'][0] for c in coord]
-            y_out = [c['uv2'][1] for c in coord]
-            data[f'OFFSET_X_{suffix}'].extend(x_out)
-            data[f'OFFSET_Y_{suffix}'].extend(y_out)
 
-        logger.info(' ...collecting petal-wide values...')        
-        # [JHS] As of 2020-11-02, these general collider parameters should be equivalent for
-        # any petal. Here, I simply use the last ptl instance from the for loop above.
-        meta['COLLIDER_ATTRIBUTES'] = general_collider_keys
-        for key in general_collider_keys:
-            meta[key] = getattr2(ptl, 'collider', key)
-        
-        # petal-wide values
-        for key, attr in pos_petal_attr_map.items():
-            value = getattr2(ptl, None, attr)
-            data[key].extend([value] * len(posids_ordered))
-        meta['PETAL_ALIGNMENTS'][petal_id] = getattr2(ptl, 'trans', 'petal_alignment')
-                    
+        if not uargs.zeno_only:
+            # polygons from collider
+            logger.info(' ...collecting polygon data...')
+            polys = ptl.get_collider_polygons()
+            collider_pos_attr_map_inverted = {v:k for k,v in collider_pos_attr_map.items()}
+            for key, val in polys.items():
+                if key in collider_general_poly_keys:
+                    meta[key] = str(polys[key])
+                else:
+                    data_key = collider_pos_attr_map_inverted[key]
+                    this_dict = polys[key]
+                    this_list = [str(this_dict[p]) for p in posids_ordered]
+                    data[data_key].extend(this_list)
+
+            # transformed values
+            logger.info(' ...collecting calculated values...')
+            offset_keys = ['OFFSET_X', 'OFFSET_Y']
+            offsets = {key: ptl.quick_query(key=key, mode='iterable') for key in offset_keys}
+            flat_offset_xy = {posid: tuple(offsets[key][posid] for key in offset_keys) for posid in posids_ordered}
+            for suffix, coord_sys in offset_variants.items():
+                coord = [{'posid': posid, 'uv1': flat_offset_xy[posid]} for posid in posids_ordered]
+                coord = ptl.transform(cs1='flatXY', cs2=coord_sys, coord=coord)
+                x_out = [c['uv2'][0] for c in coord]
+                y_out = [c['uv2'][1] for c in coord]
+                data[f'OFFSET_X_{suffix}'].extend(x_out)
+                data[f'OFFSET_Y_{suffix}'].extend(y_out)
+
+            logger.info(' ...collecting petal-wide values...')
+            # [JHS] As of 2020-11-02, these general collider parameters should be equivalent for
+            # any petal. Here, I simply use the last ptl instance from the for loop above.
+            meta['COLLIDER_ATTRIBUTES'] = general_collider_keys
+            for key in general_collider_keys:
+                meta[key] = getattr2(ptl, 'collider', key)
+
+            # petal-wide values
+            for key, attr in pos_petal_attr_map.items():
+                value = getattr2(ptl, None, attr)
+                data[key].extend([value] * len(posids_ordered))
+            meta['PETAL_ALIGNMENTS'][petal_id] = getattr2(ptl, 'trans', 'petal_alignment')
+
     logger.info('All data gathered, generating table format...')
-    t = Table(data)
-    t.meta = meta
-    
-    # add units and descriptions
-    for key in t.columns:
-        t[key].description = all_pos_keys[key]
-        if key in units:
-            t[key].unit = units[key]
-        
+    # convert POS_NEIGHBORS eleenmts to lists
+    for key in data.keys():     #['POS_NEIGHBORS', 'FIXED_NEIGHBORS']:
+        if isinstance(data[key], list):
+            if len(data[key]) != 0 and isinstance(data[key][0],set):
+                logger.info('Converting data for key %r' % key)
+                pn = []
+                for i in data[key]:
+                    pn.append(list(i))
+                data[key] = pn
+    if uargs.zeno_only:
+        cdata = []
+        header = ['POS_ID','ZENO_MOTOR_P','SZ_CW_P','SZ_CCW_P','ZENO_MOTOR_T','SZ_CW_T','SZ_CCW_T']
+        cdata.append(header)
+        for ndx, element in enumerate(data['POS_ID']):
+            if data['ZENO_MOTOR_P'][ndx] or data['ZENO_MOTOR_T'][ndx]:
+                ldata = [data[x][ndx] for x in header]
+                cdata.append(ldata)
+    else:
+        t = Table(data)
+        t.meta = meta
+
+        # add units and descriptions
+        for key in t.columns:
+            t[key].description = all_pos_keys[key]
+            if key in units:
+                t[key].unit = units[key]
+
     # save data to disk
     save_dir = os.path.realpath(uargs.outdir)
-    save_name = pc.filename_timestamp_str() + '_fp_calibs.ecsv'
+    if uargs.zeno_only:
+        save_name = pc.filename_timestamp_str() + '_fp_calibs.csv'
+    else:
+        save_name = pc.filename_timestamp_str() + '_fp_calibs.ecsv'
     save_path = os.path.join(save_dir, save_name)
-    t.write(save_path)
+    if uargs.zeno_only:
+        import csv
+        with open(save_path, mode='w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerows(cdata)
+
+    else:
+        t.write(save_path)
     logger.info(f'Data saved to: {save_path}')
-    
+
     # save a reference to this file in a standard place
     ref_path = pc.fp_calibs_path_cache
     with open(ref_path, mode='w') as file:
         file.write(save_path)
     logger.info(f'File path cached at standard location: {ref_path}')
-    
+
 except Exception as e:
     exception_during_run = e
     logger.error('get_calibrations crashed! See traceback below:')

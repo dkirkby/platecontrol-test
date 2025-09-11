@@ -59,7 +59,7 @@ for key in dir_keys_settings:
 for directory in dirs.values():
     if not os.path.isfile(directory):
         os.makedirs(directory, exist_ok=True)
-        
+
 # File locations
 positioner_locations_file = os.path.join(petal_directory, 'positioner_locations_0530v18.csv')
 small_array_locations_file = os.path.join(dirs['hwsetups'], 'SWIntegration_XY.csv')
@@ -118,8 +118,9 @@ else:
 #  2020-06-25 [JHS] For usage of new petalboxes with 20 can channels, an alternate
 #  map will need to be provided here. Selection of which map to use will need to
 #  be given by some configuration argument during petal initialization.
-power_supply_canbus_map = {'V1': {'can10', 'can11', 'can13', 'can22', 'can23'},
-                           'V2': {'can12', 'can14', 'can15', 'can16', 'can17'}}
+#  2024-11-11 [CAD] Since the 10 and 20 channel canids are disjoint sets, can use one map.
+power_supply_canbus_map = {'V1': {'can10', 'can11', 'can13', 'can22', 'can23', 'can30', 'can31', 'can32', 'can33', 'can34', 'can35', 'can39', 'can40', 'can41', 'can42'},
+                           'V2': {'can12', 'can14', 'can15', 'can16', 'can17', 'can36', 'can37', 'can38', 'can43', 'can44', 'can45', 'can46', 'can47', 'can48', 'can49'}}
 
 # Constants
 deg = '\u00b0'
@@ -137,6 +138,15 @@ T = 0  # theta axis idx -- NOT the motor axis ID!!
 P = 1  # phi axis idx -- NOT the motor axis ID!!
 axis_labels = ('theta', 'phi')
 
+# Zeno motor parameters for "linear phi"
+P_zeno_speed = 100  # 30,000 RPM - see DESI 1710, Motor Speed Parameters spreadsheet
+P_zeno_ramp  = 1    # 1.497 deg
+# P_zeno_speed = 66   # 19,800 RPM - see DESI 1710, Motor Speed Parameters spreadsheet
+# P_zeno_ramp  = 2    # 1.311 deg
+# P_zeno_speed = 33   # 9,900 RPM - see DESI 1710, Motor Speed Parameters spreadsheet
+# P_zeno_ramp  = 12    # 1.995 deg
+P_zeno_jog = 5.0    # degrees, must be greater than ramp and backlash size
+
 # common print function
 # note the implementation may be replaced at runtime by petal.py, for logging
 printfunc = print
@@ -153,6 +163,7 @@ didnotmove_check_tol = 0.080 # Margin for how far off tracking needs to be to ch
 
 # some numeric tolerances for scheduling moves
 schedule_checking_numeric_angular_tol = 0.01 # deg, equiv to about 1 um at full extension of both arms
+schedule_checking_angular_tol_zeno = 0.1174 # 0.009782 deg/motor_step * 6 rows * 2 zeno jogs/normal row
 near_full_range_reduced_hardstop_clearance_factor = 0.75 # applies to hardstop clearance values in special case of "near_full_range" (c.f. Axis class in posmodel.py)
 max_auto_creep_distance = 10.0 # deg, fallback value to prevent huge / long creep moves in case of error in distance calculation -- only affects auto-generated creep moves
 theta_hardstop_ambig_tol = 8.0 # deg, for determining when within ambiguous zone of theta hardstops
@@ -165,6 +176,7 @@ theta_hardstop_ambig_exit_margin = 5.0 # deg, additional margin to ensure gettin
 anneal_density = {'filled': 0.5,
                   'ramped': 0.35,
                   }
+max_targets_for_no_anneal = 123 # If the number of targets for each power supply is below or equal to this number, and anticollision is None or 'freeze', there is no need for annealing
 
 # Nominal and tolerance calibration values
 nominals = OrderedDict()
@@ -261,17 +273,19 @@ other_pos_calib_keys = {'TOTAL_LIMIT_SEEKS_T', 'TOTAL_LIMIT_SEEKS_P',
                         'LAST_PRIMARY_HARDSTOP_DIR_T', 'LAST_PRIMARY_HARDSTOP_DIR_P',
                         'CALIB_NOTE', 'DEVICE_CLASSIFIED_NONFUNCTIONAL', 'FIBER_INTACT'}
 fiducial_calib_keys = {'DUTY_STATE', 'DUTY_DEFAULT_ON', 'DUTY_DEFAULT_OFF'}
+zenomotor_keys = {'ZENO_MOTOR_P', 'ZENO_MOTOR_T', 'SZ_CW_P', 'SZ_CCW_P',  'SZ_CW_T', 'SZ_CCW_T'}
 posmodel_range_names = {'targetable_range_posintT', 'targetable_range_posintP',
                         'full_range_posintT', 'full_range_posintP',
                         'theta_hardstop_ambiguous_zone'}
 posmodel_keys = {'in_theta_hardstop_ambiguous_zone',
                  'abs_shaft_speed_cruise_T', 'abs_shaft_speed_cruise_P',
                  'abs_shaft_spinupdown_distance_T', 'abs_shaft_spinupdown_distance_P'}
+
 for name in posmodel_range_names:
     posmodel_keys |= {f'max_{name}', f'min_{name}'}
 
 # test for whether certain posstate keys are classified as "calibration" vals
-calib_keys = set(nominals.keys()) | set(keepout_keys) | other_pos_calib_keys | fiducial_calib_keys
+calib_keys = set(nominals.keys()) | set(keepout_keys) | other_pos_calib_keys | fiducial_calib_keys | zenomotor_keys
 def is_calib_key(key):
     return key.upper() in calib_keys
 
@@ -531,7 +545,7 @@ def concat_lists_of_lists(L1, L2):
         L2 = []
     elif not(isinstance(L2[0],list)):
         L2 = [L2]
-    return L1 + L2        
+    return L1 + L2
 
 # Enumeration of verbosity level to stdout
 not_verbose = 0
@@ -617,7 +631,7 @@ def is_float(x):
     return isinstance(x, (float, np.floating))
 
 def is_string(x):
-    return isinstance(x, (str, np.str))
+    return isinstance(x, (str))
 
 def is_boolean(x):
     return x in [True, False, 0, 1] or str(x).lower() in ['true', 'false', '0', '1']
@@ -669,7 +683,7 @@ plot_styles = {
          'linewidth' : 1,
          'edgecolor' : 'green',
          'facecolor' : 'none'},
-        
+
     'positioner element unbold':
         {'linestyle' : '--',
          'linewidth' : 0.5,
@@ -686,26 +700,26 @@ plot_styles = {
         {'linestyle' : '-',
          'linewidth' : 2,
          'edgecolor' : 'blue',
-         'facecolor' : 'none'},                            
+         'facecolor' : 'none'},
 
     'line t0':
         {'linestyle' : '-.',
          'linewidth' : 0.5,
          'edgecolor' : 'gray',
          'facecolor' : 'none'},
-        
+
     'arm lines':
         {'linestyle' : '--',
          'linewidth' : 0.7,
          'edgecolor' : 'black',
-         'facecolor' : 'none'},        
+         'facecolor' : 'none'},
 
     'Eo':
         {'linestyle' : '-',
          'linewidth' : 0.5,
          'edgecolor' : '0.9',
          'facecolor' : 'none'},
-        
+
     'Eo bold':
         {'linestyle' : '-',
          'linewidth' : 1,
